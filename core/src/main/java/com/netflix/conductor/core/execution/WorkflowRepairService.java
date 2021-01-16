@@ -21,6 +21,8 @@ import com.netflix.conductor.core.utils.QueueUtils;
 import com.netflix.conductor.dao.ExecutionDAO;
 import com.netflix.conductor.dao.QueueDAO;
 import com.netflix.conductor.metrics.Monitors;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
@@ -38,6 +40,7 @@ import java.util.function.Predicate;
 @Service
 public class WorkflowRepairService {
 
+    private static final Logger LOGGER = LoggerFactory.getLogger(WorkflowRepairService.class);
     private final ExecutionDAO executionDAO;
     private final QueueDAO queueDAO;
     private final ConductorProperties properties;
@@ -102,6 +105,7 @@ public class WorkflowRepairService {
             String queueName = WorkflowExecutor.DECIDER_QUEUE;
             if (!queueDAO.containsMessage(queueName, workflow.getWorkflowId())) {
                 queueDAO.push(queueName, workflow.getWorkflowId(), properties.getSweepFrequency().getSeconds());
+                LOGGER.info("Workflow {} repaired by repairer", workflow.getWorkflowId());
                 Monitors.recordQueueMessageRepushFromRepairService(queueName);
                 return true;
             }
@@ -116,12 +120,13 @@ public class WorkflowRepairService {
      * @return
      */
     @VisibleForTesting
-    protected boolean verifyAndRepairTask(Task task) {
+    boolean verifyAndRepairTask(Task task) {
         if (isTaskRepairable.test(task)) {
             // Ensure QueueDAO contains this taskId
             String taskQueueName = QueueUtils.getQueueName(task);
             if (!queueDAO.containsMessage(taskQueueName, task.getTaskId())) {
                 queueDAO.push(taskQueueName, task.getTaskId(), task.getCallbackAfterSeconds());
+                LOGGER.info("Task {} in workflow {} repaired by repairer", task.getTaskId(), task.getWorkflowInstanceId());
                 Monitors.recordQueueMessageRepushFromRepairService(task.getTaskDefName());
                 return true;
             }

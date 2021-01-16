@@ -1517,7 +1517,7 @@ public class TestWorkflowExecutor {
     }
 
     @Test
-    public void testCancelNonTerminalTasks() {
+    public void testCancelNonTerminalSystemTasks() {
         Workflow workflow = generateSampleWorkflow();
 
         Task subWorkflowTask = new Task();
@@ -1537,7 +1537,7 @@ public class TestWorkflowExecutor {
 
         workflow.getTasks().addAll(Arrays.asList(subWorkflowTask, lambdaTask, simpleTask));
 
-        List<String> erroredTasks = workflowExecutor.cancelNonTerminalTasks(workflow);
+        List<String> erroredTasks = workflowExecutor.cancelNonTerminalSystemTasks(workflow);
         assertTrue(erroredTasks.isEmpty());
         ArgumentCaptor<Task> argumentCaptor = ArgumentCaptor.forClass(Task.class);
         verify(executionDAOFacade, times(2)).updateTask(argumentCaptor.capture());

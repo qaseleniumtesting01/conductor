@@ -48,6 +48,7 @@ import com.netflix.conductor.core.exception.ApplicationException;
 import com.netflix.conductor.core.exception.ApplicationException.Code;
 import com.netflix.conductor.core.exception.TerminateWorkflowException;
 import com.netflix.conductor.core.execution.tasks.SubWorkflow;
+import com.netflix.conductor.core.execution.tasks.Terminate;
 import com.netflix.conductor.core.execution.tasks.WorkflowSystemTask;
 import com.netflix.conductor.core.listener.WorkflowStatusListener;
 import com.netflix.conductor.core.metadata.MetadataMapperService;
@@ -656,6 +657,46 @@ public class WorkflowExecutor {
             .orElse(null);
     }
 
+    void endWorkflow(Workflow workflow) {
+        Optional<Task> terminateTask = workflow.getTasks().stream()
+            .filter(t -> TERMINATE.name().equals(t.getTaskType()) && t.getStatus().isTerminal())
+            .findFirst();
+        if (terminateTask.isPresent()) {
+            /*
+             * The TERMINATE task completes the workflow but does not do anything with SCHEDULED or IN_PROGRESS tasks to complete them
+             */
+            List<Task> tasksToBeUpdated = new ArrayList<>();
+            for (Task workflowTask : workflow.getTasks()) {
+                if (!workflowTask.getStatus().isTerminal()) {
+                    workflowTask.setStatus(SKIPPED);
+                    tasksToBeUpdated.add(workflowTask);
+                }
+            }
+            /*
+             * Now find nested subworkflows that also need to have their tasks skipped
+             */
+            for (Task workflowTask : workflow.getTasks()) {
+                if (SUB_WORKFLOW.name().equals(workflowTask.getTaskType()) && StringUtils
+                    .isNotBlank(workflowTask.getSubWorkflowId())) {
+                    Workflow subWorkflow = executionDAOFacade
+                        .getWorkflowById(workflowTask.getSubWorkflowId(), true);
+                    if (subWorkflow != null) {
+                        skipTasksAffectedByTerminateTask(subWorkflow);
+                    }
+                }
+            }
+            executionDAOFacade.updateTasks(tasksToBeUpdated);
+            if (WorkflowStatus.FAILED.name()
+                .equals(terminateTask.get().getInputData().get(Terminate.getTerminationStatusParameter()))) {
+                workflow.setStatus(WorkflowStatus.FAILED);
+                terminate(workflow,
+                    new TerminateWorkflowException("Workflow is FAILED by TERMINATE task: " + terminateTask.get().getTaskId()));
+                return;
+            }
+        }
+        completeWorkflow(workflow);
+    }
+
     /**
      * @param wf the workflow to be completed
      * @throws ApplicationException if workflow is not in terminal state
@@ -749,7 +790,7 @@ public class WorkflowExecutor {
                 LOGGER.warn("Error removing task(s) from queue during workflow termination : {}", workflowId, e);
             }
 
-            List<String> erroredTasks = cancelNonTerminalTasks(workflow);
+            List<String> erroredTasks = cancelNonTerminalSystemTasks(workflow);
 
             if (workflow.getParentWorkflowId() != null) {
                 updateParentWorkflowTask(workflow);
@@ -1016,7 +1057,7 @@ public class WorkflowExecutor {
 
         if (workflow.getStatus().isTerminal()) {
             if (!workflow.getStatus().isSuccessful()) {
-                cancelNonTerminalTasks(workflow);
+                cancelNonTerminalSystemTasks(workflow);
             }
             return true;
         }
@@ -1024,7 +1065,8 @@ public class WorkflowExecutor {
         try {
             DeciderService.DeciderOutcome outcome = deciderService.decide(workflow);
             if (outcome.isComplete) {
-                completeWorkflow(workflow);
+                endWorkflow(workflow);
+//                completeWorkflow(workflow);
                 return true;
             }
 
@@ -1041,45 +1083,48 @@ public class WorkflowExecutor {
                     Workflow workflowInstance = deciderService.populateWorkflowAndTaskData(workflow);
                     if (!workflowSystemTask.isAsync() && workflowSystemTask.execute(workflowInstance, task, this)) {
                         // FIXME: temporary hack to workaround TERMINATE task
-                        if (TERMINATE.name().equals(task.getTaskType())) {
-                            deciderService.externalizeTaskData(task);
-                            executionDAOFacade.updateTask(task);
-                            workflow.setOutput(workflowInstance.getOutput());
-                            List<Task> terminateTasksToBeUpdated = new ArrayList<Task>();
-                            /*
-                             * The TERMINATE task completes the workflow but does not do anything with SCHEDULED or IN_PROGRESS tasks to complete them
-                             */
-                            for (Task workflowTask : workflow.getTasks()) {
-                                if (workflowTask != task && !workflowTask.getStatus().isTerminal()) {
-                                    workflowTask.setStatus(SKIPPED);
-                                    terminateTasksToBeUpdated.add(workflowTask);
-                                }
-                            }
-                            /*
-                             * Now find nested subworkflows that also need to have their tasks skipped
-                             */
-                            for (Task workflowTask : workflow.getTasks()) {
-                                if (SUB_WORKFLOW.name().equals(workflowTask.getTaskType()) && StringUtils
-                                    .isNotBlank(workflowTask.getSubWorkflowId())) {
-                                    Workflow subWorkflow = executionDAOFacade
-                                        .getWorkflowById(workflowTask.getSubWorkflowId(), true);
-                                    if (subWorkflow != null) {
-                                        skipTasksAffectedByTerminateTask(subWorkflow);
-                                    }
-                                }
-                            }
-                            executionDAOFacade.updateTasks(terminateTasksToBeUpdated);
-                            if (workflowInstance.getStatus().equals(WorkflowStatus.COMPLETED)) {
-                                completeWorkflow(workflow);
-                            } else {
-                                workflow.setStatus(workflowInstance.getStatus());
-                                terminate(workflow, new TerminateWorkflowException(
-                                    "Workflow is FAILED by TERMINATE task: " + task.getTaskId()));
-                            }
-                            return true;
-                        }
+//                        if (TERMINATE.name().equals(task.getTaskType())) {
+//                            deciderService.externalizeTaskData(task);
+////                            executionDAOFacade.updateTask(task);
+//                            tasksToBeUpdated.add(task);
+//                            workflow.setOutput(workflowInstance.getOutput());
+////                            List<Task> terminateTasksToBeUpdated = new ArrayList<>();
+//                            /*
+//                             * The TERMINATE task completes the workflow but does not do anything with SCHEDULED or IN_PROGRESS tasks to complete them
+//                             */
+//                            for (Task workflowTask : workflow.getTasks()) {
+//                                if (workflowTask != task && !workflowTask.getStatus().isTerminal()) {
+//                                    workflowTask.setStatus(SKIPPED);
+////                                    terminateTasksToBeUpdated.add(workflowTask);
+//                                    tasksToBeUpdated.add(workflowTask);
+//                                }
+//                            }
+//                            /*
+//                             * Now find nested subworkflows that also need to have their tasks skipped
+//                             */
+//                            for (Task workflowTask : workflow.getTasks()) {
+//                                if (SUB_WORKFLOW.name().equals(workflowTask.getTaskType()) && StringUtils
+//                                    .isNotBlank(workflowTask.getSubWorkflowId())) {
+//                                    Workflow subWorkflow = executionDAOFacade
+//                                        .getWorkflowById(workflowTask.getSubWorkflowId(), true);
+//                                    if (subWorkflow != null) {
+//                                        skipTasksAffectedByTerminateTask(subWorkflow);
+//                                    }
+//                                }
+//                            }
+//                            executionDAOFacade.updateTasks(terminateTasksToBeUpdated);
+//                            if (workflowInstance.getStatus().equals(WorkflowStatus.COMPLETED)) {
+//                                completeWorkflow(workflow);
+//                            } else {
+//                                workflow.setStatus(workflowInstance.getStatus());
+//                                terminate(workflow, new TerminateWorkflowException(
+//                                    "Workflow is FAILED by TERMINATE task: " + task.getTaskId()));
+//                            }
+//                            return true;
+//                        } else {
                         deciderService.externalizeTaskData(task);
                         tasksToBeUpdated.add(task);
+//                        }
                         stateChanged = true;
                     }
                 }
@@ -1142,7 +1187,7 @@ public class WorkflowExecutor {
     }
 
     @VisibleForTesting
-    List<String> cancelNonTerminalTasks(Workflow workflow) {
+    List<String> cancelNonTerminalSystemTasks(Workflow workflow) {
         List<String> erroredTasks = new ArrayList<>();
         // Update non-terminal tasks' status to CANCELED
         for (Task task : workflow.getTasks()) {
@@ -1420,8 +1465,8 @@ public class WorkflowExecutor {
 
     /**
      * Gets the active domain from the list of domains where the task is to be queued. The domain list must be ordered.
-     * In sequence, check if any worker has polled for last `activeWorkerLastPollMs`, if so that is the
-     * Active domain. When no active domains are found:
+     * In sequence, check if any worker has polled for last `activeWorkerLastPollMs`, if so that is the Active domain.
+     * When no active domains are found:
      * <li> If NO_DOMAIN token is provided, return null.
      * <li> Else, return last domain from list.
      *
